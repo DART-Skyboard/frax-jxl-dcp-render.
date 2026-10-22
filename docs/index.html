@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Frax JXL DCP Render — Support</title>
+<style>
+:root{--bg:#f6f3ea;--fg:#1d1b26;--mut:#6a6679;--acc:#b8650b;--card:#fffdf6;--line:#ddd7c6}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0d14;--fg:#e9ecf5;--mut:#8f96ab;--acc:#f1b43a;--card:#12151f;--line:#232838}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif;padding:0 16px}
+main{max-width:760px;margin:0 auto;padding:32px 0 64px}
+h1{font:700 14px ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--acc);margin:0 0 6px}
+h2{font-size:22px;margin:36px 0 8px} p,li{color:var(--fg)} .m{color:var(--mut)}
+details{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px 14px;margin:10px 0}
+summary{cursor:pointer;font-weight:600} code{background:var(--card);border:1px solid var(--line);padding:1px 5px;border-radius:4px;font-size:.92em;overflow-wrap:anywhere}
+a{color:var(--acc)}
+</style></head><body><main>
+<h1>Radical Deepscale · DART Meadow</h1>
+<h2 style="margin-top:0;font-size:30px">Frax JXL DCP Render</h2>
+<p class="m">A Blender extension that renders JPEG XL stills and animations and builds festival DCPs. Requires Blender 5.2 LTS or later.</p>
+
+<h2>Quick start</h2>
+<ol><li>Install the extension (Preferences → Get Extensions, or Install from Disk with a zip from <a href="https://github.com/DART-Skyboard/frax-jxl-dcp-render/releases">Releases</a>).</li>
+<li>Open <b>Output properties → JPEG XL (Frax)</b>.</li>
+<li>Set the frame range and an output path that exists, for example <code>/home/you/renders/shot.jxl</code>. Save the .blend first if you use a <code>//</code> relative path.</li>
+<li>Press <b>Render Animation → JPEG XL</b> and let every frame finish. The animated .jxl is written for you.</li></ol>
+
+<h2>Troubleshooting</h2>
+<details><summary>"This platform isn't one of (windows-x64, …)" on Android</summary><p>The store package lists desktop platforms only. Use the Android build from Releases (the <code>-android</code> zip) and pick the pure-Python encoder.</p></details>
+<details><summary>enum "TIFF" or "PNG" not found in ('FFMPEG')</summary><p>Fixed in 1.2.2. Blender 5 separates Media Type from File Format; older versions tried to set TIFF while Media Type was Video. Update, then restart Blender completely, because reinstalling does not reload add-on code that is already running.</p></details>
+<details><summary>The saved .jxl is tiny / one frame</summary><p>Image → Save As in the Render Result window saves only the frame on screen. Use <b>Render Animation → JPEG XL</b>.</p></details>
+<details><summary>The output path box is red</summary><p>The path cannot be resolved. Save the .blend (for <code>//</code> paths) or choose a full path to a folder that exists.</p></details>
+<details><summary>Can't open a long .jxl on my device</summary><p>Browsers and some viewers load every frame. Use a player that decodes frame by frame,.</p></details>
+
+<h2>Contact</h2>
+<p>Open an <a href="https://github.com/DART-Skyboard/frax-jxl-dcp-render/issues">issue</a> or visit <a href="https://radicaldeepscale.com/frax.html">radicaldeepscale.com/frax.html</a>.</p>
+<p class="m">GPL-3.0-or-later · JPEG XL / libjxl by the JPEG XL Project Authors (BSD-3-Clause) · wasmtime (Apache-2.0)</p>
+</main></body></html>
