@@ -1,73 +1,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Pixels in, JPEG XL out: reading renders / frame files, colour handling, focus areas, the streaming animation writer.
+# Pixels in, JPEG XL out: reading renders / frame files, and the streaming animation writer. The colour maths, the
+# per-file Plan and the encoder options live in jxlcore.py (no bpy) so the animation worker process can share them.
+import base64
+import json
 import os
-import queue
+import subprocess
+import sys
 import tempfile
-import threading
 import time
 
 import bpy
 import numpy as np
 
-from . import engine, pyengine
-from .settings import depth_params, frame_options
+from . import engine, pyengine                                         # noqa: F401  (re-exported for callers)
+from .jxlcore import (Plan, add_with_focus, analyse, focus_pixels, frame_options,  # noqa: F401
+                      hlg_encode, linear_to_bt709, linear_to_srgb, pq_encode, srgb_to_linear, to_target, use_libjxl,
+                      xmp_xml)
 
 LINEAR_EXTS = {".exr", ".hdr"}
-
-# ── colour maths ──────────────────────────────────────────────────────────────────────────────────────────────
-M_709_TO_2020 = np.array([[0.6274040, 0.3292820, 0.0433136], [0.0690970, 0.9195400, 0.0113612], [0.0163916, 0.0880132, 0.8955950]], np.float32)
-M_709_TO_P3 = np.array([[0.8224622, 0.1775378, 0.0], [0.0331942, 0.9668058, 0.0], [0.0170827, 0.0723974, 0.9105199]], np.float32)
-
-
-def srgb_to_linear(v):
-    v = np.clip(v, 0.0, None)
-    return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4).astype(np.float32)
-
-
-def linear_to_srgb(v):
-    v = np.clip(v, 0.0, None)
-    return np.where(v <= 0.0031308, v * 12.92, 1.055 * np.power(v, 1 / 2.4) - 0.055).astype(np.float32)
-
-
-def linear_to_bt709(v):
-    v = np.clip(v, 0.0, None)
-    return np.where(v < 0.018, 4.5 * v, 1.099 * np.power(v, 0.45) - 0.099).astype(np.float32)
-
-
-def pq_encode(nits):            # SMPTE ST 2084
-    m1, m2, c1, c2, c3 = 0.1593017578125, 78.84375, 0.8359375, 18.8515625, 18.6875
-    y = np.clip(nits / 10000.0, 0.0, 1.0) ** m1
-    return ((c1 + c2 * y) / (1 + c3 * y)) ** m2
-
-
-def hlg_encode(e):              # ARIB STD-B67 / BT.2100
-    a, b, c = 0.17883277, 0.28466892, 0.55991073
-    e = np.clip(e, 0.0, 1.0)
-    return np.where(e <= 1 / 12, np.sqrt(3 * e), a * np.log(np.maximum(12 * e - b, 1e-9)) + c).astype(np.float32)
-
-
-def to_target(rgb, linear_src, color):
-    """rgb HxWx3 float → values in the JPEG XL colour space chosen. Blender's scene-linear is Rec.709 primaries;
-    HDR uses BT.2408 reference white (scene value 1.0 = 203 nits)."""
-    color = int(color)
-    if color == 0 and not linear_src:
-        return rgb                                                    # already sRGB display values: keep exactly
-    lin = rgb if linear_src else srgb_to_linear(rgb)
-    if color == 0:
-        return linear_to_srgb(lin)
-    if color == 1:
-        return lin
-    if color == 2:
-        return linear_to_srgb(lin @ M_709_TO_P3.T)
-    l2020 = np.clip(lin @ M_709_TO_2020.T, 0.0, None)
-    if color == 5:
-        return linear_to_bt709(l2020)
-    if color == 3:
-        return pq_encode(l2020 * 203.0).astype(np.float32)
-    if color == 4:
-        return hlg_encode(l2020 * 0.2652)
-    return rgb
-
 
 # ── reading pixels ─────────────────────────────────────────────────────────────────────────────────────────────
 def load_file_pixels(path):
@@ -112,71 +62,7 @@ def image_pixels(image, scene, linear):
             pass
 
 
-# ── settings → encoder job ────────────────────────────────────────────────────────────────────────────────────
-def analyse(arr):
-    a = arr[..., 3]
-    has_alpha = bool((a < 0.999).any())
-    rgb = arr[..., :3]
-    grey = bool(np.abs(rgb[..., 0] - rgb[..., 1]).max() < 1e-4 and np.abs(rgb[..., 1] - rgb[..., 2]).max() < 1e-4)
-    return has_alpha, grey
-
-
-class Plan:
-    """Everything fixed for the whole file: depth, channels, alpha, colour. Built from the first frame."""
-
-    def __init__(self, s, first, linear_src, film_transparent=False):
-        self.s = s
-        has_alpha, grey = analyse(first)
-        self.bits, self.exp, self.dtype = depth_params(s)
-        self.float_out = self.exp > 0
-        self.linear_src = linear_src
-        self.color = int(s.color)
-        if linear_src and not self.float_out and self.color == 1:
-            self.color = 0                                              # linear in 8–16-bit integer bands badly: store sRGB
-        self.grey = s.channels == "GREY" or (s.channels == "AUTO" and grey)
-        self.alpha = s.alpha == "KEEP" or (s.alpha == "AUTO" and (has_alpha or film_transparent))
-        if self.alpha:
-            if s.alpha_bits == "SAME":
-                self.alpha_bits, self.alpha_exp = self.bits, self.exp
-            else:
-                self.alpha_bits, self.alpha_exp = int(s.alpha_bits), (5 if self.float_out and s.alpha_bits == "16" else 0)
-        else:
-            self.alpha_bits = self.alpha_exp = 0
-        self.channels = 1 if self.grey else 3
-
-    def convert(self, arr, crop=None):
-        if crop:
-            x, y, w, h = crop
-            arr = arr[y:y + h, x:x + w]
-        rgb = to_target(arr[..., :3], self.linear_src, self.color)
-        if self.grey:
-            rgb = (0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2])[..., None]
-        parts = [rgb]
-        if self.alpha:
-            parts.append(arr[..., 3:4])
-        out = np.concatenate(parts, axis=2) if len(parts) > 1 else rgb
-        if self.float_out:
-            if self.bits == 16:                                             # half floats: round once, here
-                out = out.astype(np.float16)
-            return np.ascontiguousarray(out, dtype=np.float32)
-        top = 255.0 if self.dtype == np.uint8 else 65535.0
-        return np.ascontiguousarray(np.clip(out, 0, 1) * top + 0.5).astype(self.dtype)
-
-    def encoder(self, width, height, animated=False, fps=(24, 1), boxes=(), cache_dir=None):
-        s = self.s
-        lossless = s.mode == "LOSSLESS"
-        cls = engine.Encoder if use_libjxl(s) else pyengine.Encoder
-        return cls(width, height, bits=self.bits, exp_bits=self.exp, channels=self.channels,
-                              alpha_bits=self.alpha_bits, alpha_exp=self.alpha_exp, premultiplied=s.premultiplied,
-                              animated=animated, tps_num=fps[0], tps_den=fps[1], loops=s.loops,
-                              original_profile=lossless or s.color_transform == "1", intensity_target=s.intensity,
-                              color=self.color, intent=int(s.intent), container=int(s.container), level=int(s.level),
-                              boxes=boxes, cache_dir=cache_dir, lossy_float=not lossless)
-
-
 def xmp_box(s, scene, frame=None, extra=None):
-    def esc(t):
-        return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     info = {}
     if s.write_render_info and scene:
         r = scene.render
@@ -194,29 +80,8 @@ def xmp_box(s, scene, frame=None, extra=None):
         info.update(extra)
     if not (info or s.author or s.copyright or s.title):
         return []
-    x = ('<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
-         'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" '
-         'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" '
-         'xmlns:frax="https://radicaldeepscale.com/ns/frax/1.0/" xmp:CreatorTool="Blender %s · Frax JPEG XL / DCP Render"' % esc(bpy.app.version_string))
-    x += "".join(' frax:%s="%s"' % (k, esc(v)) for k, v in info.items()) + ">"
-    if s.title:
-        x += '<dc:title><rdf:Alt><rdf:li xml:lang="x-default">%s</rdf:li></rdf:Alt></dc:title>' % esc(s.title)
-    if s.author:
-        x += "<dc:creator><rdf:Seq><rdf:li>%s</rdf:li></rdf:Seq></dc:creator>" % esc(s.author)
-    if s.copyright:
-        x += '<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">%s</rdf:li></rdf:Alt></dc:rights>' % esc(s.copyright)
-    x += '</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>'
+    x = xmp_xml(s, info, bpy.app.version_string)
     return [("xml ", x.encode("utf-8"), s.compress_boxes == "1")]
-
-
-def focus_pixels(rects, w, h):
-    out = []
-    for (x, y, rw, rh) in rects:
-        px, py = max(0, int(round(x * w))), max(0, int(round(y * h)))
-        pw, ph = min(w - px, int(round(rw * w))), min(h - py, int(round(rh * h)))
-        if pw >= 8 and ph >= 8:
-            out.append((px, py, pw, ph))
-    return out
 
 
 def object_rect(scene, obj, depsgraph=None):
@@ -252,35 +117,6 @@ def scene_focus_rects(scene, s, depsgraph=None):
     return out
 
 
-def use_libjxl(s):
-    return getattr(s, "engine", "PYTHON") == "LIBJXL" and engine.available()
-
-
-def add_with_focus(enc, plan, arr, rects_px, duration):
-    """One displayed frame.  Pure-Python engine: focus tiles are coded at the focus quality inside the same frame
-    (and stored first).  libjxl engine: base image, then sharper focus layers on top (crop + replace blending)."""
-    s = plan.s
-    base = frame_options(s)
-    if not rects_px or s.mode == "LOSSLESS":
-        enc.add_frame(plan.convert(arr), base, duration=duration)
-        return
-    if isinstance(enc, pyengine.Encoder):
-        enc.add_frame(plan.convert(arr), base, duration=duration, focus=rects_px, focus_quality=s.focus_quality,
-                      focus_first=s.focus_first and int(s.group_order) == -1)
-        return
-    if s.focus_first and int(s.group_order) == -1:
-        x, y, w, h = rects_px[0]
-        base["ints"][13] = 1
-        base["ints"][14] = x + w // 2
-        base["ints"][15] = y + h // 2
-    enc.add_frame(plan.convert(arr), base, duration=0)
-    fd = min(engine.quality_to_distance(s.focus_quality), s.distance)
-    for i, c in enumerate(rects_px):
-        last = i == len(rects_px) - 1
-        enc.add_frame(plan.convert(arr, crop=c), frame_options(s, distance=fd, lossless=False),
-                      duration=duration if last else 0, crop=c, blend=0, name="focus %d" % (i + 1))
-
-
 def encode_still(arr, linear, s, scene, path, rects=None, cache_dir=None, frame=None):
     h, w = arr.shape[:2]
     film = bool(scene and scene.render.film_transparent)
@@ -298,10 +134,39 @@ def encode_still(arr, linear, s, scene, path, rects=None, cache_dir=None, frame=
     return len(data), time.time() - t0
 
 
-# ── streaming animation writer (one background thread owns the encoder) ──────────────────────────────────────
+# ── streaming animation writer: the encoder runs in its own PROCESS (worker.py) ──────────────────────────────────
+def settings_dict(s):
+    """A plain-JSON copy of the scene's JPEG XL settings for the worker (no Blender objects cross over)."""
+    d = {}
+    for p in s.bl_rna.properties:
+        k = p.identifier
+        if k in ("rna_type", "focus", "focus_index") or p.type in ("POINTER", "COLLECTION"):
+            continue
+        v = getattr(s, k)
+        d[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
+    return d
+
+
+def _python_env():
+    """Environment for the worker: the bundled Python finds numpy itself; add the folder holding the extension's
+    wheels (wasmtime) so the optional libjxl engine works too."""
+    env = dict(os.environ)
+    extra = []
+    try:
+        import wasmtime
+        extra.append(os.path.dirname(os.path.dirname(os.path.abspath(wasmtime.__file__))))
+    except Exception:                                                  # noqa: BLE001
+        pass
+    if extra:
+        env["PYTHONPATH"] = os.pathsep.join(extra + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 class AnimationWriter:
-    """Frames go in as they are rendered; the encoder runs on its own thread so rendering never waits for it
-    (except when it is more than a few frames behind)."""
+    """Frames go in as they are rendered; a separate worker process (worker.py) encodes them so rendering never waits.
+    The two sides talk through plain files in a spool folder: this side appends lines to queue.txt, the worker
+    answers in status.json — no threads, queues or pipes, so it behaves the same on every OS and inside Blender."""
 
     def __init__(self, s, scene, path, cache_dir=None, track_rects=None):
         self.s, self.path, self.cache_dir = s, path, cache_dir
@@ -313,71 +178,116 @@ class AnimationWriter:
         self.boxes = xmp_box(s, scene, extra={"FrameStart": str(scene.frame_start), "FrameEnd": str(scene.frame_end)})
         self.static_rects = [(f.x, f.y, f.w, f.h) for f in s.focus if not f.track] if s.focus_on else []
         self.track_rects = track_rects or {}
-        self.q = queue.Queue(maxsize=3)
         self.error = None
-        self.frames = 0
-        self.bytes = 0
+        self._frames = 0
+        self._bytes = 0
         self.files = []
-        self.done = threading.Event()
-        self.t = threading.Thread(target=self._run, name="frax-jxl-animation", daemon=True)
-        self.t.start()
+        self._done = False
+        self._sent_end = False
+        self._seq = 0
+        self.spool = tempfile.mkdtemp(prefix="frax_jxl_spool_")
+        self.queue_path = os.path.join(self.spool, "queue.txt")
+        self.status_path = os.path.join(self.spool, "status.json")
+        open(self.queue_path, "w").close()
+        job = dict(settings=settings_dict(s), tps=list(self.tps), step=self.step, film=bool(self.film),
+                   boxes=[[t, base64.b64encode(b).decode("ascii"), bool(c)] for t, b, c in self.boxes],
+                   static_rects=[list(r_) for r_ in self.static_rects],
+                   track_rects={str(k): [list(r_) for r_ in v] for k, v in self.track_rects.items()},
+                   path=path, cache_dir=cache_dir, remove_frames=bool(s.remove_frames), files=[])
+        with open(os.path.join(self.spool, "job.json"), "w", encoding="utf-8") as f:
+            json.dump(job, f)
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.proc = subprocess.Popen([sys.executable, os.path.join(here, "worker.py"), self.spool, here],
+                                     env=_python_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    # ── status (polled from the main thread) ──
+    def _poll(self):
+        try:
+            with open(self.status_path, "r", encoding="utf-8") as f:
+                st = json.load(f)
+            self._frames, self._bytes = st.get("frames", 0), st.get("bytes", 0)
+            if st.get("error") and not self.error:
+                self.error = st["error"]
+            if st.get("done"):
+                self._done = True
+        except (OSError, ValueError):
+            pass
+        if not self._done and self.proc.poll() is not None:             # worker died without saying so
+            self._poll_final()
+
+    def _poll_final(self):
+        try:
+            with open(self.status_path, "r", encoding="utf-8") as f:
+                st = json.load(f)
+            self._frames, self._bytes = st.get("frames", 0), st.get("bytes", 0)
+            self.error = self.error or st.get("error")
+        except (OSError, ValueError):
+            self.error = self.error or "the JPEG XL worker process stopped unexpectedly"
+        self._done = True
+
+    @property
+    def frames(self):
+        self._poll()
+        return self._frames
+
+    @property
+    def bytes(self):
+        self._poll()
+        return self._bytes
+
+    @property
+    def is_done(self):
+        self._poll()
+        return self._done
+
+    def wait(self, timeout=None):
+        """Background mode: block until the worker has finished."""
+        t0 = time.time()
+        while not self.is_done:
+            if timeout is not None and time.time() - t0 > timeout:
+                return False
+            time.sleep(0.1)
+        return True
+
+    # ── feeding ──
+    def _send(self, line):
+        with open(self.queue_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
     def add(self, arr, linear, frame, file_path=None):
         if self.error:
             return
         if file_path:
             self.files.append(file_path)
-        self.q.put((arr, linear, frame, None))
+        self._seq += 1
+        npy = os.path.join(self.spool, "f%06d.npy" % self._seq)
+        np.save(npy, np.ascontiguousarray(arr, dtype=np.float32))
+        self._send("N|%d|%s|%d" % (frame, npy, 1 if linear else 0))
 
     def add_file(self, path, frame):
-        """Queue a frame file; it is read on the encoder thread (TIFF / EXR, no Blender API)."""
+        """Queue a frame file (TIFF / EXR); the worker reads it with its own bpy-free reader."""
         if self.error:
             return
         self.files.append(path)
-        self.q.put((None, None, frame, path))
+        self._send("F|%d|%s" % (frame, path))
 
     def finish(self):
-        self.q.put(None)
+        if not self._sent_end:
+            self._sent_end = True
+            self._send("END")
 
     def abort(self):
         self.error = self.error or "cancelled"
-        self.q.put(None)
+        if not self._sent_end:
+            self._sent_end = True
+            self._send("ABORT")
 
-    def _run(self):
-        enc = plan = None
+    def cleanup(self):
+        import shutil
         try:
-            while True:
-                item = self.q.get()
-                if item is None:
-                    break
-                if self.error:
-                    continue
-                arr, linear, frame, path = item
-                if arr is None:
-                    from . import frames
-                    arr, linear = frames.read_any(path)
-                h, w = arr.shape[:2]
-                if enc is None:
-                    plan = Plan(self.s, arr, linear, self.film)
-                    enc = plan.encoder(w, h, animated=True, fps=self.tps, boxes=self.boxes, cache_dir=self.cache_dir)
-                rects = list(self.static_rects) + list(self.track_rects.get(frame, []))
-                add_with_focus(enc, plan, arr, focus_pixels(rects, w, h), self.step)
-                self.frames += 1
-            if enc is not None and not self.error:
-                data = enc.finish()
-                os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-                with open(self.path, "wb") as f:
-                    f.write(data)
-                self.bytes = len(data)
-                if self.s.remove_frames:
-                    for p in self.files:
-                        try:
-                            os.remove(p)
-                        except OSError:
-                            pass
-        except Exception as e:                       # noqa: BLE001 — surfaced in the UI
-            self.error = str(e)
-        finally:
-            if enc is not None:
-                enc.close()
-            self.done.set()
+            if self.proc.poll() is None:
+                self.proc.terminate()
+        except Exception:                                              # noqa: BLE001
+            pass
+        shutil.rmtree(self.spool, ignore_errors=True)

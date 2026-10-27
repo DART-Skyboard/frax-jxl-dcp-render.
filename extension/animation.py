@@ -12,14 +12,14 @@ from . import capture, dcp
 # One active session at a time.
 #   kind: "jxl"  — our Render Animation → JPEG XL (we chose the frame format; settings restored afterwards)
 #         "auto" — the user's own Ctrl F12 with "Also write an animated .jxl" switched on
-#         "dcp"  — Render DCP (TIFF master → DCP-o-matic)
+#         "dcp"  — Render DCP (TIFF master → built-in DCP writer)
 SESSION = None
 
 
 class Session:
     def __init__(self, kind, scene, restore=None, jxl_path=None, temp_dir=None, dcp_info=None, track=None, reader="bpy"):
         self.kind, self.scene_name = kind, scene.name
-        self.reader = reader              # "fast": our TIFF/EXR reader on the encoder thread · "bpy": after the render
+        self.reader = reader              # "fast": the worker process reads the TIFF/EXR · "bpy": Blender reads it after the render
         self.restore = restore or {}
         self.temp_dir = temp_dir
         self.dcp_info = dcp_info
@@ -60,7 +60,7 @@ def _set_status(msg):
 
 
 def _ingest(path, frame):
-    """Main thread only: read a written frame and queue it for the encoder thread."""
+    """Read a written frame with Blender and hand it to the worker process."""
     s = SESSION
     if not s or not s.writer:
         return
@@ -92,7 +92,7 @@ def on_render_write(scene, *_):
         return
     SESSION.seen.add(frame)
     # Never touch Blender's image API here: this runs inside the render. Frames we chose the format of are read
-    # on the encoder thread; anything else is read after the render has finished.
+    # by the worker process; anything else is read after the render has finished.
     if SESSION.reader == "fast" and SESSION.writer:
         SESSION.writer.add_file(path, frame)
         SESSION.status = "Encoding frame %d into JPEG XL…" % frame
@@ -137,9 +137,10 @@ def _pump():
     if s.cancelled:
         s.pending.clear()
     if s.writer and not s.complete:
+        s.writer._poll()
         _set_status(s.status if not s.writer.error else "JPEG XL error: " + s.writer.error)
     if s.complete and not s.pending:
-        if s.writer and not s.writer.done.is_set():
+        if s.writer and not s.writer.is_done:
             if not getattr(s, "_finishing", False):
                 s._finishing = True
                 s.writer.finish()
@@ -159,7 +160,7 @@ def finish_now():
         _ingest(*s.pending.popleft())
     if s.writer:
         s.writer.finish()
-        s.writer.done.wait()
+        s.writer.wait()
     _finalise()
 
 
@@ -173,6 +174,7 @@ def _finalise():
     msg = []
     if s.writer:
         w = s.writer
+        w._poll()
         if s.cancelled:
             msg.append("Render cancelled — no JPEG XL written")
         elif w.error:
@@ -182,17 +184,18 @@ def _finalise():
         if s.temp_dir and s.kind == "jxl" and not s.cancelled and not w.error:
             import shutil
             shutil.rmtree(s.temp_dir, ignore_errors=True)
+        w.cleanup()
     if s.kind == "dcp" and scene and not s.cancelled:
         info = s.dcp_info
         job = dcp.make_job(scene, info["master"], info.get("wav"), info["film"])
-        dcp.DCPJob.current = job
+        dcp.BuiltinDCPJob.current = job
         bpy.app.timers.register(_dcp_poll, first_interval=0.5)
         msg.append("Master rendered — building the DCP…")
     _set_status(" · ".join(msg) or "Done")
 
 
 def _dcp_poll():
-    job = dcp.DCPJob.current
+    job = dcp.BuiltinDCPJob.current
     if job is None:
         return None
     pct = (" %d%%" % round(job.progress * 100)) if job.progress else ""

@@ -4,7 +4,8 @@ import bpy
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty,
                        StringProperty)
 
-from .engine import ID, quality_to_distance
+from .engine import quality_to_distance
+from .jxlcore import depth_params, frame_options                    # noqa: F401  (moved to the bpy-free core)
 
 AUTO = ("-1", "Auto", "Let the encoder decide")
 ONOFF = [AUTO, ("1", "On", ""), ("0", "Off", "")]
@@ -128,60 +129,6 @@ class FRAXJXL_Settings(bpy.types.PropertyGroup):
     author: StringProperty(name="Author")
     copyright: StringProperty(name="Copyright")
     title: StringProperty(name="Title")
-
-
-def _opt(v):
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return -1
-
-
-def frame_options(s, distance=None, lossless=None):
-    """Settings → the dict Encoder.add_frame expects."""
-    ints, floats = {}, {}
-
-    def I(k, v):
-        v = _opt(v)
-        if v != -1:
-            ints[ID[k]] = v
-    I("EFFORT", s.effort)
-    if s.decoding_speed:
-        I("DECODING_SPEED", s.decoding_speed)
-    for k, a in (("MODULAR_GROUP_SIZE", "group_size"), ("GROUP_ORDER", "group_order"), ("PROGRESSIVE_DC", "progressive_dc"),
-                 ("PROGRESSIVE_AC", "progressive_ac"), ("QPROGRESSIVE_AC", "qprogressive_ac"), ("RESPONSIVE", "responsive"),
-                 ("BUFFERING", "buffering"), ("EPF", "epf"), ("GABORISH", "gaborish"), ("NOISE", "noise"), ("DOTS", "dots"),
-                 ("PATCHES", "patches"), ("RESAMPLING", "resampling"), ("EC_RESAMPLING", "ec_resampling"),
-                 ("KEEP_INVISIBLE", "keep_invisible"), ("LOSSY_PALETTE", "lossy_palette"), ("COLOR_TRANSFORM", "color_transform"),
-                 ("DISABLE_PERCEPTUAL", "disable_perceptual"), ("FULL_IMAGE_HEURISTICS", "full_heuristics"),
-                 ("JPEG_COMPRESS_BOXES", "compress_boxes")):
-        I(k, getattr(s, a))
-    I("CENTER_X", s.center_x)
-    I("CENTER_Y", s.center_y)
-    I("MODULAR", 1 if s.mode == "MODULAR" else s.force_modular)
-    I("MODULAR_PREDICTOR", s.predictor)
-    I("PALETTE_COLORS", s.palette_colors)
-    I("NB_PREV_CH", s.nb_prev)
-    I("MODULAR_COLOR_SPACE", s.modular_color_space)
-    I("BROTLI_EFFORT", s.brotli_effort)
-    if s.photon_noise > 0:
-        floats[ID["PHOTON_NOISE"]] = s.photon_noise
-    if s.ma_tree >= 0:
-        floats[ID["MA_TREE_PCT"]] = s.ma_tree
-    if s.colors_global >= 0:
-        floats[ID["CH_COLORS_GLOBAL"]] = s.colors_global
-    if s.colors_group >= 0:
-        floats[ID["CH_COLORS_GROUP"]] = s.colors_group
-    ll = (s.mode == "LOSSLESS") if lossless is None else lossless
-    return dict(ints=ints, floats=floats, lossless=ll, distance=None if ll else (s.distance if distance is None else distance),
-                alpha_distance=0.0 if s.alpha_lossless else quality_to_distance(s.alpha_quality))
-
-
-def depth_params(s):
-    """→ bits, exp_bits, numpy dtype for the chosen bit depth"""
-    import numpy as np
-    return {"8": (8, 0, np.uint8), "10": (10, 0, np.uint16), "12": (12, 0, np.uint16), "16": (16, 0, np.uint16),
-            "F16": (16, 5, np.float32), "F32": (32, 8, np.float32)}[s.bit_depth]
 
 
 classes = (FRAXJXL_FocusArea, FRAXJXL_Settings)

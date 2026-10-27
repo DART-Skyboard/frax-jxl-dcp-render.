@@ -279,7 +279,7 @@ class FRAXDCP_OT_apply_format(bpy.types.Operator):
 
 
 class FRAXDCP_OT_render(bpy.types.Operator):
-    """Render a DCI master (16-bit TIFF + 48 kHz/24-bit WAV) and build a festival-ready DCP (built-in or DCP-o-matic)"""
+    """Render a DCI master (16-bit TIFF + 48 kHz/24-bit WAV) and build a festival-ready DCP (2K/4K, SMPTE or Interop)"""
     bl_idname = "frax_dcp.render"
     bl_label = "Render DCP"
 
@@ -326,15 +326,10 @@ class FRAXDCP_OT_render(bpy.types.Operator):
 
 
 def _builder_ready(op, d):
-    if d.builder == "BUILTIN":
-        ok, msg = dcp.builtin_ok(d)
-        if not ok:
-            op.report({"ERROR"}, msg)
-        return ok
-    if not dcp.dcpomatic_tool("dcpomatic2_create"):
-        op.report({"ERROR"}, "DCP-o-matic not found — install it free from dcpomatic.com, or set its folder in the DCP panel")
-        return False
-    return True
+    ok, msg = dcp.builtin_ok(d)
+    if not ok:
+        op.report({"ERROR"}, msg)
+    return ok
 
 
 def _mixdown(ctx, scene, path, layout):
@@ -345,7 +340,7 @@ def _mixdown(ctx, scene, path, layout):
         ff.audio_channels = "SURROUND51" if layout == "51" else "STEREO"
         with ctx.temp_override(scene=scene):
             r = bpy.ops.sound.mixdown(filepath=path, check_existing=False, container="WAV", codec="PCM", format="S24", accuracy=1024)
-        return "FINISHED" in r                     # Blender writes the file as a background job; the DCP builders wait for it
+        return "FINISHED" in r                     # Blender writes the file as a background job; the DCP builder waits for it
     except Exception as e:                                       # noqa: BLE001
         print("[Frax DCP] mixdown:", e)
         return False
@@ -376,7 +371,7 @@ class FRAXDCP_OT_build_from_folder(bpy.types.Operator, ImportHelper):
         d.keep_master = True                                     # never delete frames we didn't make
         job = dcp.make_job(scene, folder, wav, os.path.join(root, name))
         d.keep_master = keep
-        dcp.DCPJob.current = job
+        dcp.BuiltinDCPJob.current = job
         bpy.app.timers.register(animation._dcp_poll, first_interval=0.5)
         self.report({"INFO"}, "Building DCP " + name)
         return {"FINISHED"}
@@ -387,8 +382,8 @@ class FRAXDCP_OT_cancel(bpy.types.Operator):
     bl_label = "Cancel DCP Build"
 
     def execute(self, ctx):
-        if dcp.DCPJob.current:
-            dcp.DCPJob.current.cancel()
+        if dcp.BuiltinDCPJob.current:
+            dcp.BuiltinDCPJob.current.cancel()
         return {"FINISHED"}
 
 

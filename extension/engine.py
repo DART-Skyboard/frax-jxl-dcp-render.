@@ -5,7 +5,6 @@
 # The C bridge is the same one Frax Studio uses in the browser (tools/frax-jxl/jxw.c in the Ariel repo).
 import ctypes
 import os
-import threading
 
 import numpy as np
 
@@ -47,41 +46,39 @@ class JXLError(RuntimeError):
 
 
 class _Runtime:
-    """One wasmtime instance. Not thread-safe: use one per thread (Encoder creates its own when asked)."""
+    """One wasmtime instance. One per process; the extension never uses threads."""
     _module = None
     _engine = None
-    _lock = threading.Lock()
 
     @classmethod
     def _load_module(cls, cache_dir=None):
         import wasmtime
-        with cls._lock:
-            if cls._module is None:
-                cfg = wasmtime.Config()
-                cfg.cranelift_opt_level = "speed"
+        if cls._module is None:
+            cfg = wasmtime.Config()
+            cfg.cranelift_opt_level = "speed"
+            try:
+                cfg.wasm_simd = True
+            except Exception:
+                pass
+            cls._engine = wasmtime.Engine(cfg)
+            mod = None
+            cache = os.path.join(cache_dir, "frax-jxl-%s.cwasm" % getattr(wasmtime, "__version__", "wt48")) if cache_dir else None
+            if cache and os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(WASM_PATH):
                 try:
-                    cfg.wasm_simd = True
+                    mod = wasmtime.Module.deserialize_file(cls._engine, cache)   # skip the ~seconds of JIT compile
                 except Exception:
-                    pass
-                cls._engine = wasmtime.Engine(cfg)
-                mod = None
-                cache = os.path.join(cache_dir, "frax-jxl-%s.cwasm" % getattr(wasmtime, "__version__", "wt48")) if cache_dir else None
-                if cache and os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(WASM_PATH):
+                    mod = None
+            if mod is None:
+                mod = wasmtime.Module.from_file(cls._engine, WASM_PATH)
+                if cache:
                     try:
-                        mod = wasmtime.Module.deserialize_file(cls._engine, cache)   # skip the ~seconds of JIT compile
+                        os.makedirs(cache_dir, exist_ok=True)
+                        with open(cache, "wb") as f:
+                            f.write(mod.serialize())
                     except Exception:
-                        mod = None
-                if mod is None:
-                    mod = wasmtime.Module.from_file(cls._engine, WASM_PATH)
-                    if cache:
-                        try:
-                            os.makedirs(cache_dir, exist_ok=True)
-                            with open(cache, "wb") as f:
-                                f.write(mod.serialize())
-                        except Exception:
-                            pass
-                cls._module = mod
-            return cls._engine, cls._module
+                        pass
+            cls._module = mod
+        return cls._engine, cls._module
 
     def __init__(self, cache_dir=None):
         import wasmtime

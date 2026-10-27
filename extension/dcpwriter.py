@@ -163,7 +163,8 @@ K = {
 }
 K = {k: UL(v) for k, v in K.items()}
 
-OP_ATOM = UL("060e2b34.04010102.0d010201.10000000")
+OP_ATOM = UL("060e2b34.04010102.0d010201.10000000")                    # SMPTE label set
+OP_ATOM_INTEROP = UL("060e2b34.04010101.0d010201.10000000")           # MXF Interop label set (version byte 01)
 EC_GENERIC = UL("060e2b34.04010103.0d010301.027f0100")
 EC_J2K = UL("060e2b34.04010107.0d010301.020c0100")
 EC_WAVE = UL("060e2b34.04010101.0d010301.02060100")
@@ -232,6 +233,7 @@ SOUND_TAGS = {
     0xfffc: "060e2b34.0101010e.01030701.02000000", 0xfffd: "060e2b34.0101010e.01030701.05000000",
     0xfffe: "060e2b34.0101010e.01030701.01000000", 0xffff: "060e2b34.01010109.06010104.06100000",
 }
+INTEROP_TAGS = {0xffff: "060e2b34.01010102.06010104.06100000"}     # SubDescriptors, registry version 2 (Interop)
 PICTURE_ONLY = {0x3201, 0x3202, 0x3203, 0x320c, 0x320e, 0x3401, 0x3406, 0x3407}
 SOUND_ONLY = {0x3d01, 0x3d02, 0x3d03, 0x3d07, 0x3d09, 0x3d0a, 0x3d32}
 HEADER_SIZE = 16384                                           # header partition + metadata + fill, as asdcplib
@@ -242,25 +244,30 @@ def local_set(key, items):
     return klv(key, b"".join(u16(t) + u16(len(v)) + v for t, v in items))
 
 
-def partition(key, this, prev, footer, header_bytes, index_bytes, index_sid, body_sid, ecs):
+def partition(key, this, prev, footer, header_bytes, index_bytes, index_sid, body_sid, ecs, op=OP_ATOM):
     v = (u16(1) + u16(2) + u32(1) + u64(this) + u64(prev) + u64(footer) + u64(header_bytes) + u64(index_bytes) +
-         u32(index_sid) + u64(0) + u32(body_sid) + OP_ATOM + batch(ecs))
+         u32(index_sid) + u64(0) + u32(body_sid) + op + batch(ecs))
     return klv(key, v)
 
 
 class TrackFile:
-    """One MXF OP-Atom track file, written frame by frame; the header is rewritten in place at close()."""
+    """One MXF OP-Atom track file, written frame by frame; the header is rewritten in place at close().
+    interop=True writes the legacy "MXF Interop" label set (header partition carries the essence, no body partition,
+    older registry labels), exactly what asdcplib writes without -L; the default is the SMPTE (ST 429-3) layout."""
 
-    def __init__(self, path, kind, edit_rate, product_version="1.2.0", company="Radical Deepscale",
-                 product="Frax JXL DCP Render", **kw):
+    def __init__(self, path, kind, edit_rate, product_version="1.2.3", company="Radical Deepscale",
+                 product="Frax JXL DCP Render", interop=False, **kw):
         self.path, self.kind, self.rate = path, kind, (int(edit_rate), 1)
+        self.interop = bool(interop)
+        self.op = OP_ATOM_INTEROP if self.interop else OP_ATOM
         self.kw = kw
         self.company, self.product, self.version = company, product, product_version
         self.asset_uuid = kw.get("asset_uuid") or uuid.uuid4()
         self.ecs = [EC_GENERIC, EC_J2K] if kind == "picture" else [EC_WAVE, EC_GENERIC]
         self.f = open(path, "wb")
         self.f.write(b"\0" * HEADER_SIZE)
-        self.f.write(partition(K["body"], HEADER_SIZE, 0, 0, 0, 0, 0, 1, self.ecs))
+        if not self.interop:
+            self.f.write(partition(K["body"], HEADER_SIZE, 0, 0, 0, 0, 0, 1, self.ecs, self.op))
         self.essence_start = self.f.tell()
         self.offsets = []
         self.frames = 0
@@ -289,7 +296,7 @@ class TrackFile:
         sets = []
         sets.append(local_set(K["Preface"], [
             (0x3c0a, ids["preface"]), (0x3b02, now), (0x3b05, u16(0x0102)), (0x3b07, u32(1)), (0x3b08, ids["fp"]),
-            (0x3b06, batch([ids["ident"]])), (0x3b03, ids["storage"]), (0x3b09, OP_ATOM), (0x3b0a, batch(self.ecs)),
+            (0x3b06, batch([ids["ident"]])), (0x3b03, ids["storage"]), (0x3b09, self.op), (0x3b0a, batch(self.ecs)),
             (0x3b0b, batch([]))]))
         vs = [int(x) for x in (self.version.split(".") + ["0", "0"])[:3]]
         sets.append(local_set(K["Identification"], [
@@ -336,6 +343,11 @@ class TrackFile:
         sets += self._descriptor(ids, n)
         tags = dict(TAGS)
         tags.update(PICTURE_TAGS if pic else SOUND_TAGS)
+        if self.interop and pic:
+            tags.update(INTEROP_TAGS)
+        elif self.interop:                                   # Interop sound: no MCA sub-descriptors, no delta array
+            for k in list(range(0xfff8, 0x10000)) + [0x3d32, 0x3f09]:
+                tags.pop(k, None)
         skip = SOUND_ONLY if pic else PICTURE_ONLY
         entries = [u16(t) + UL(v) for t, v in sorted(tags.items()) if t not in skip]
         primer = klv(K["primer"], batch(entries, 18))
@@ -362,10 +374,14 @@ class TrackFile:
         lang = self.kw.get("language", "en")
         sg_link = uuid.uuid4().bytes
         subs = [uuid.uuid4().bytes for _ in range(1 + len(MCA_CHANNELS))]
-        desc = local_set(K["WaveDescriptor"], [
-            (0x3c0a, ids["desc"]), (0xffff, batch(subs)), (0x3006, u32(2)), (0x3001, rational(*er)), (0x3002, i64(n)),
+        wave_items = [
+            (0x3c0a, ids["desc"]), (0x3006, u32(2)), (0x3001, rational(*er)), (0x3002, i64(n)),
             (0x3004, EC_WAVE), (0x3d03, rational(48000, 1)), (0x3d02, u8(0)), (0x3d07, u32(ch)), (0x3d01, u32(24)),
-            (0x3d0a, u16(3 * ch)), (0x3d09, u32(48000 * 3 * ch)), (0x3d32, CHANNEL_ASSIGNMENT_MCA)])
+            (0x3d0a, u16(3 * ch)), (0x3d09, u32(48000 * 3 * ch))]
+        if self.interop:                                     # Interop has no MCA labels (ST 377-4 is SMPTE only)
+            return [local_set(K["WaveDescriptor"], wave_items)]
+        desc = local_set(K["WaveDescriptor"], wave_items[:1] + [(0xffff, batch(subs))] + wave_items[1:] +
+                         [(0x3d32, CHANNEL_ASSIGNMENT_MCA)])
         out = [desc, local_set(K["SoundfieldGroup"], [
             (0x3c0a, subs[0]), (0xfffe, MCA_SOUNDFIELD_51), (0xfffd, sg_link), (0xfffc, utf16("sg51")),
             (0xfffb, utf16("5.1")), (0xfffa, lang.encode("ascii"))])]
@@ -389,19 +405,23 @@ class TrackFile:
                       (0x3f0a, u32(0) + u32(11))]
         return local_set(K["index"], items)
 
-    def close(self):
+    def close(self, hash=True):
         if self.frames == 0:
             self.f.close()
             raise ValueError("no frames written")
         footer_at = self.f.tell()
         index = self._index()
-        self.f.write(partition(K["footer"], footer_at, HEADER_SIZE, footer_at, 0, len(index), 129, 0, self.ecs))
+        self.f.write(partition(K["footer"], footer_at, 0 if self.interop else HEADER_SIZE, footer_at, 0, len(index), 129, 0,
+                               self.ecs, self.op))
         self.f.write(index)
-        rip = u32(0) + u64(0) + u32(1) + u64(HEADER_SIZE) + u32(0) + u64(footer_at)
+        if self.interop:
+            rip = u32(1) + u64(0) + u32(0) + u64(footer_at)
+        else:
+            rip = u32(0) + u64(0) + u32(1) + u64(HEADER_SIZE) + u32(0) + u64(footer_at)
         self.f.write(klv(K["rip"], rip + u32(16 + 4 + len(rip) + 4)))
         # header partition + metadata, padded with a fill item to exactly HEADER_SIZE
         meta = self._header_metadata()
-        hp = partition(K["header"], 0, 0, footer_at, HEADER_SIZE - 140, 0, 0, 0, self.ecs)
+        hp = partition(K["header"], 0, 0, footer_at, HEADER_SIZE - 140, 0, 0, 1 if self.interop else 0, self.ecs, self.op)
         room = HEADER_SIZE - len(hp) - len(meta) - 20
         if room < 0:
             raise ValueError("MXF header metadata too large")
@@ -410,7 +430,8 @@ class TrackFile:
         self.f.seek(0)
         self.f.write(head)
         self.f.close()
-        self.sha1 = sha1_b64(self.path)
+        if hash:
+            self.sha1 = sha1_b64(self.path)
         return self
 
 
@@ -420,6 +441,27 @@ def sha1_b64(path):
         for b in iter(lambda: f.read(1 << 22), b""):
             h.update(b)
     return base64.b64encode(h.digest()).decode("ascii")
+
+
+class Sha1Job:
+    """Hashes a file a slice at a time so Blender's main thread never blocks: call step(seconds) until it returns True."""
+
+    def __init__(self, path):
+        self.path, self.size, self.done_bytes = path, os.path.getsize(path), 0
+        self.h, self.f, self.b64 = hashlib.sha1(), open(path, "rb"), None
+
+    def step(self, seconds=0.2):
+        import time
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            b = self.f.read(1 << 22)
+            if not b:
+                self.f.close()
+                self.b64 = base64.b64encode(self.h.digest()).decode("ascii")
+                return True
+            self.h.update(b)
+            self.done_bytes += len(b)
+        return False
 
 
 # ── sound: WAV (any channel count, 24-bit or 16-bit, 48 kHz) → 6-channel 5.1 frames ─────────────────────────────
@@ -453,13 +495,23 @@ def wav_frames(path, fps, frames, layout="STEREO"):
         yield out[i * spf:(i + 1) * spf].tobytes()
 
 
-# ── XML: CPL, PKL, ASSETMAP, VOLINDEX (SMPTE) ───────────────────────────────────────────────────────────────────
+# ── XML: CPL, PKL, ASSETMAP, VOLINDEX (SMPTE ST 429-7/8/9 and the legacy Interop schemas) ───────────────────────
 NS_CPL = "http://www.smpte-ra.org/schemas/429-7/2006/CPL"
 NS_PKL = "http://www.smpte-ra.org/schemas/429-8/2007/PKL"
 NS_AM = "http://www.smpte-ra.org/schemas/429-9/2007/AM"
+NS_VL = "http://www.smpte-ra.org/schemas/429-9/2007/AM"
 NS_META = "http://www.smpte-ra.org/schemas/429-16/2014/CPL-Metadata"
+NS_CPL_IOP = "http://www.digicine.com/PROTO-ASDCP-CPL-20040511#"
+NS_PKL_IOP = "http://www.digicine.com/PROTO-ASDCP-PKL-20040311#"
+NS_AM_IOP = "http://www.digicine.com/PROTO-ASDCP-AM-20040311#"
+NS_VL_IOP = "http://www.digicine.com/PROTO-ASDCP-VL-20040311#"
 KIND = {"FTR": "feature", "SHR": "short", "TLR": "trailer", "TSR": "teaser", "TST": "test", "ADV": "advertisement",
         "PSA": "psa", "POL": "policy", "RTG": "rating", "XSN": "transitional"}
+# PKL asset types: Interop names the asdcp kind, SMPTE just says mxf / xml
+PKL_TYPE = {False: {"cpl": "text/xml", "pic": "application/mxf", "snd": "application/mxf"},
+            True: {"cpl": "text/xml;asdcpKind=CPL", "pic": "application/x-smpte-mxf;asdcpKind=Picture",
+                   "snd": "application/x-smpte-mxf;asdcpKind=Sound"}}
+INTEROP_RATIOS = (1.33, 1.66, 1.77, 1.85, 2.00, 2.39)       # the only ScreenAspectRatio values the Interop CPL allows
 
 
 def esc(s):
@@ -471,39 +523,47 @@ def iso(t):
 
 
 def write_cpl(path, name, kind, pic, snd, fps, w, h, issuer, creator, territory="US", facility="", audio="51",
-              title=None):
+              title=None, interop=False, container_ratio=None):
     now = iso(datetime.datetime.now(datetime.timezone.utc))
     cpl_id, n = uuid.uuid4(), pic.frames
     rate = "%d 1" % fps
+    if interop:                                              # decimal ratio, snapped to the five the schema allows
+        r = container_ratio or (w / h)
+        sar = "%.2f" % min(INTEROP_RATIOS, key=lambda a: abs(a - r))
+    else:
+        sar = "%d %d" % (w, h)
 
     def asset(tag, tf, extra):
         return ("      <%s>\n        <Id>urn:uuid:%s</Id>\n        <EditRate>%s</EditRate>\n"
                 "        <IntrinsicDuration>%d</IntrinsicDuration>\n        <EntryPoint>0</EntryPoint>\n"
                 "        <Duration>%d</Duration>\n        <Hash>%s</Hash>\n%s      </%s>\n") % (
             tag, tf.asset_uuid, rate, tf.frames, tf.frames, tf.sha1, extra, tag)
-    reel = asset("MainPicture", pic, "        <FrameRate>%s</FrameRate>\n        <ScreenAspectRatio>%d %d</ScreenAspectRatio>\n" % (rate, w, h))
+    reel = asset("MainPicture", pic, "        <FrameRate>%s</FrameRate>\n        <ScreenAspectRatio>%s</ScreenAspectRatio>\n" % (rate, sar))
     if snd:
         reel += asset("MainSound", snd, "")
-    msc = {"51": "51/L,R,C,LFE,Ls,Rs", "STEREO": "51/L,R,-,-,-,-"}.get(audio, "51/-,-,-,-,-,-")
-    meta = ("      <meta:CompositionMetadataAsset xmlns:meta=\"%s\">\n        <Id>urn:uuid:%s</Id>\n"
-            "        <EditRate>%s</EditRate>\n        <IntrinsicDuration>%d</IntrinsicDuration>\n"
-            "        <meta:FullContentTitleText>%s</meta:FullContentTitleText>\n"
-            "        <meta:ReleaseTerritory>%s</meta:ReleaseTerritory>\n"
-            "        <meta:VersionNumber status=\"final\">1</meta:VersionNumber>\n"
-            "        <meta:Facility>%s</meta:Facility>\n"
-            "        <meta:Luminance units=\"foot-lambert\">14</meta:Luminance>\n"
-            "        <meta:MainSoundConfiguration>%s</meta:MainSoundConfiguration>\n"
-            "        <meta:MainSoundSampleRate>48000 1</meta:MainSoundSampleRate>\n"
-            "        <meta:MainPictureStoredArea><meta:Width>%d</meta:Width><meta:Height>%d</meta:Height></meta:MainPictureStoredArea>\n"
-            "        <meta:MainPictureActiveArea><meta:Width>%d</meta:Width><meta:Height>%d</meta:Height></meta:MainPictureActiveArea>\n"
-            "        <meta:ExtensionMetadataList>\n"
-            "          <meta:ExtensionMetadata scope=\"http://isdcf.com/ns/cplmd/app\">\n"
-            "            <meta:Name>Application</meta:Name>\n"
-            "            <meta:PropertyList><meta:Property><meta:Name>DCP Constraints Profile</meta:Name>"
-            "<meta:Value>SMPTE-RDD-52:2020-Bv2.1</meta:Value></meta:Property></meta:PropertyList>\n"
-            "          </meta:ExtensionMetadata>\n        </meta:ExtensionMetadataList>\n"
-            "      </meta:CompositionMetadataAsset>\n") % (
-        NS_META, uuid.uuid4(), rate, n, esc(title or name), esc(territory), esc(facility or issuer), msc, w, h, w, h)
+    if interop:
+        meta = ""                                            # Interop has no composition-metadata asset
+    else:
+        msc = {"51": "51/L,R,C,LFE,Ls,Rs", "STEREO": "51/L,R,-,-,-,-"}.get(audio, "51/-,-,-,-,-,-")
+        meta = ("      <meta:CompositionMetadataAsset xmlns:meta=\"%s\">\n        <Id>urn:uuid:%s</Id>\n"
+                "        <EditRate>%s</EditRate>\n        <IntrinsicDuration>%d</IntrinsicDuration>\n"
+                "        <meta:FullContentTitleText>%s</meta:FullContentTitleText>\n"
+                "        <meta:ReleaseTerritory>%s</meta:ReleaseTerritory>\n"
+                "        <meta:VersionNumber status=\"final\">1</meta:VersionNumber>\n"
+                "        <meta:Facility>%s</meta:Facility>\n"
+                "        <meta:Luminance units=\"foot-lambert\">14</meta:Luminance>\n"
+                "        <meta:MainSoundConfiguration>%s</meta:MainSoundConfiguration>\n"
+                "        <meta:MainSoundSampleRate>48000 1</meta:MainSoundSampleRate>\n"
+                "        <meta:MainPictureStoredArea><meta:Width>%d</meta:Width><meta:Height>%d</meta:Height></meta:MainPictureStoredArea>\n"
+                "        <meta:MainPictureActiveArea><meta:Width>%d</meta:Width><meta:Height>%d</meta:Height></meta:MainPictureActiveArea>\n"
+                "        <meta:ExtensionMetadataList>\n"
+                "          <meta:ExtensionMetadata scope=\"http://isdcf.com/ns/cplmd/app\">\n"
+                "            <meta:Name>Application</meta:Name>\n"
+                "            <meta:PropertyList><meta:Property><meta:Name>DCP Constraints Profile</meta:Name>"
+                "<meta:Value>SMPTE-RDD-52:2020-Bv2.1</meta:Value></meta:Property></meta:PropertyList>\n"
+                "          </meta:ExtensionMetadata>\n        </meta:ExtensionMetadataList>\n"
+                "      </meta:CompositionMetadataAsset>\n") % (
+            NS_META, uuid.uuid4(), rate, n, esc(title or name), esc(territory), esc(facility or issuer), msc, w, h, w, h)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<CompositionPlaylist xmlns="%s">\n'
            '  <Id>urn:uuid:%s</Id>\n  <AnnotationText>%s</AnnotationText>\n  <IssueDate>%s</IssueDate>\n'
            '  <Issuer>%s</Issuer>\n  <Creator>%s</Creator>\n  <ContentTitleText>%s</ContentTitleText>\n'
@@ -511,32 +571,33 @@ def write_cpl(path, name, kind, pic, snd, fps, w, h, issuer, creator, territory=
            '    <LabelText>%s</LabelText>\n  </ContentVersion>\n  <RatingList/>\n  <ReelList>\n    <Reel>\n'
            '      <Id>urn:uuid:%s</Id>\n      <AssetList>\n%s%s      </AssetList>\n    </Reel>\n  </ReelList>\n'
            '</CompositionPlaylist>\n') % (
-        NS_CPL, cpl_id, esc(name), now, esc(issuer), esc(creator), esc(name), KIND.get(kind, "short"), uuid.uuid4(),
-        esc(name), uuid.uuid4(), reel.replace("      <", "        <"), meta)
+        NS_CPL_IOP if interop else NS_CPL, cpl_id, esc(name), now, esc(issuer), esc(creator), esc(name),
+        KIND.get(kind, "short"), uuid.uuid4(), esc(name), uuid.uuid4(), reel.replace("      <", "        <"), meta)
     with open(path, "w", encoding="utf-8") as f:
         f.write(xml)
     return cpl_id
 
 
-def write_pkl(path, name, assets, issuer, creator):
-    """assets: [(uuid, file path, mime)]"""
+def write_pkl(path, name, assets, issuer, creator, interop=False, hashes=None):
+    """assets: [(uuid, file path, type)]  — type is the PKL_TYPE value."""
     now = iso(datetime.datetime.now(datetime.timezone.utc))
     pkl_id = uuid.uuid4()
     rows = "".join(
         "    <Asset>\n      <Id>urn:uuid:%s</Id>\n      <AnnotationText>%s</AnnotationText>\n      <Hash>%s</Hash>\n"
         "      <Size>%d</Size>\n      <Type>%s</Type>\n      <OriginalFileName>%s</OriginalFileName>\n    </Asset>\n" % (
-            a, esc(os.path.basename(p)), sha1_b64(p), os.path.getsize(p), t, esc(os.path.basename(p))) for a, p, t in assets)
+            a, esc(os.path.basename(p)), (hashes or {}).get(p) or sha1_b64(p), os.path.getsize(p), t, esc(os.path.basename(p))) for a, p, t in assets)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<PackingList xmlns="%s">\n  <Id>urn:uuid:%s</Id>\n'
            '  <AnnotationText>%s</AnnotationText>\n  <IssueDate>%s</IssueDate>\n  <Issuer>%s</Issuer>\n'
            '  <Creator>%s</Creator>\n  <AssetList>\n%s  </AssetList>\n</PackingList>\n') % (
-        NS_PKL, pkl_id, esc(name), now, esc(issuer), esc(creator), rows)
+        NS_PKL_IOP if interop else NS_PKL, pkl_id, esc(name), now, esc(issuer), esc(creator), rows)
     with open(path, "w", encoding="utf-8") as f:
         f.write(xml)
     return pkl_id
 
 
-def write_assetmap(folder, pkl, assets, issuer, creator):
-    """assets: [(uuid, file path)] (pkl = (uuid, path) is flagged PackingList)."""
+def write_assetmap(folder, pkl, assets, issuer, creator, interop=False):
+    """assets: [(uuid, file path)] (pkl = (uuid, path) is flagged PackingList). Interop names the files ASSETMAP and
+    VOLINDEX with no extension; SMPTE uses ASSETMAP.xml / VOLINDEX.xml."""
     now = iso(datetime.datetime.now(datetime.timezone.utc))
 
     def row(a, p, is_pkl=False):
@@ -545,22 +606,30 @@ def write_assetmap(folder, pkl, assets, issuer, creator):
                 "          <Length>%d</Length>\n        </Chunk>\n      </ChunkList>\n    </Asset>\n") % (
             a, "      <PackingList>true</PackingList>\n" if is_pkl else "", esc(os.path.basename(p)), os.path.getsize(p))
     rows = row(pkl[0], pkl[1], True) + "".join(row(a, p) for a, p in assets)
-    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<AssetMap xmlns="%s">\n  <Id>urn:uuid:%s</Id>\n'
-           '  <Creator>%s</Creator>\n  <VolumeCount>1</VolumeCount>\n  <IssueDate>%s</IssueDate>\n'
-           '  <Issuer>%s</Issuer>\n  <AssetList>\n%s  </AssetList>\n</AssetMap>\n') % (
-        NS_AM, uuid.uuid4(), esc(creator), now, esc(issuer), rows)
-    with open(os.path.join(folder, "ASSETMAP.xml"), "w", encoding="utf-8") as f:
+    if interop:           # Interop element order: Id, VolumeCount, IssueDate, Issuer, Creator
+        head = "  <VolumeCount>1</VolumeCount>\n  <IssueDate>%s</IssueDate>\n  <Issuer>%s</Issuer>\n  <Creator>%s</Creator>\n" % (
+            now, esc(issuer), esc(creator))
+    else:                 # SMPTE: Creator, VolumeCount, IssueDate, Issuer
+        head = "  <Creator>%s</Creator>\n  <VolumeCount>1</VolumeCount>\n  <IssueDate>%s</IssueDate>\n  <Issuer>%s</Issuer>\n" % (
+            esc(creator), now, esc(issuer))
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<AssetMap xmlns="%s">\n  <Id>urn:uuid:%s</Id>\n%s'
+           '  <AssetList>\n%s  </AssetList>\n</AssetMap>\n') % (NS_AM_IOP if interop else NS_AM, uuid.uuid4(), head, rows)
+    with open(os.path.join(folder, "ASSETMAP" if interop else "ASSETMAP.xml"), "w", encoding="utf-8") as f:
         f.write(xml)
-    with open(os.path.join(folder, "VOLINDEX.xml"), "w", encoding="utf-8") as f:
-        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<VolumeIndex xmlns="%s">\n  <Index>1</Index>\n</VolumeIndex>\n' % NS_AM)
+    with open(os.path.join(folder, "VOLINDEX" if interop else "VOLINDEX.xml"), "w", encoding="utf-8") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<VolumeIndex xmlns="%s">\n  <Index>1</Index>\n</VolumeIndex>\n' %
+                (NS_VL_IOP if interop else NS_VL))
 
 
-def finish_package(folder, name, kind, pic, snd, fps, w, h, issuer="Radical Deepscale", creator="Frax JXL DCP Render 1.2.0",
-                   **meta):
+def finish_package(folder, name, kind, pic, snd, fps, w, h, issuer="Radical Deepscale", creator="Frax JXL DCP Render 1.2.3",
+                   interop=False, hashes=None, **meta):
     cpl_path = os.path.join(folder, "CPL_%s.xml" % name)
-    cpl_id = write_cpl(cpl_path, name, kind, pic, snd, fps, w, h, issuer, creator, **meta)
-    assets = [(cpl_id, cpl_path, "text/xml")] + [(t.asset_uuid, t.path, "application/mxf") for t in (pic, snd) if t]
+    cpl_id = write_cpl(cpl_path, name, kind, pic, snd, fps, w, h, issuer, creator, interop=interop, **meta)
+    ty = PKL_TYPE[bool(interop)]
+    assets = [(cpl_id, cpl_path, ty["cpl"]), (pic.asset_uuid, pic.path, ty["pic"])]
+    if snd:
+        assets.append((snd.asset_uuid, snd.path, ty["snd"]))
     pkl_path = os.path.join(folder, "PKL_%s.xml" % name)
-    pkl_id = write_pkl(pkl_path, name, assets, issuer, creator)
-    write_assetmap(folder, (pkl_id, pkl_path), [(a, p) for a, p, _ in assets], issuer, creator)
+    pkl_id = write_pkl(pkl_path, name, assets, issuer, creator, interop=interop, hashes=hashes)
+    write_assetmap(folder, (pkl_id, pkl_path), [(a, p) for a, p, _ in assets], issuer, creator, interop=interop)
     return cpl_path

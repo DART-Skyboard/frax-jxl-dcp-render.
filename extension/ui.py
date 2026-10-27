@@ -219,7 +219,6 @@ class FRAXDCP_PT_main(_Out, bpy.types.Panel):
         col.prop(d, "fit")
         col.prop(d, "standard")
         col.prop(d, "audio")
-        col.prop(d, "builder")
         l.operator("frax_dcp.apply_format", icon="CHECKMARK")
         box = l.box()
         box.label(text="Festival checks", icon="VIEWZOOM")
@@ -231,7 +230,7 @@ class FRAXDCP_PT_main(_Out, bpy.types.Panel):
         row.operator("frax_dcp.render", icon="RENDER_ANIMATION")
         l.operator("frax_dcp.build_from_folder", icon="FILE_FOLDER")
         l.prop(d, "output")
-        job = dcp.DCPJob.current
+        job = dcp.BuiltinDCPJob.current
         if job and not job.done:
             l.label(text=job.status[:100], icon="TIME")
             if job.progress:
@@ -264,16 +263,9 @@ class FRAXDCP_PT_advanced(_Out, bpy.types.Panel):
         d, l = ctx.scene.frax_dcp, self.layout
         l.use_property_split = True
         l.prop(d, "keep_master")
-        if d.builder == "BUILTIN":
-            col = l.column(align=True)
-            col.label(text="JPEG 2000: Blender's OpenJPEG, DCI 2K cinema profile, X'Y'Z' 12-bit", icon="INFO")
-            col.label(text="MXF (SMPTE 429-4 / 382, MCA 5.1) + CPL with ISDCF metadata, unencrypted")
-        else:
-            l.prop(d, "bitrate")
-            l.prop(d, "encrypt")
-            l.prop(d, "dcpomatic_dir")
-            p = dcp.dcpomatic_tool("dcpomatic2_create")
-            l.label(text=("Using " + p) if p else "DCP-o-matic not found — free download: dcpomatic.com", icon="CHECKMARK" if p else "URL")
+        col = l.column(align=True)
+        col.label(text="JPEG 2000: Blender's OpenJPEG, DCI cinema profile, X'Y'Z' 12-bit", icon="INFO")
+        col.label(text="MXF (SMPTE 429-4 / 382, MCA 5.1) or MXF Interop + CPL with ISDCF metadata, unencrypted")
 
 
 # ── menus ──────────────────────────────────────────────────────────────────────────────────────────────────────
