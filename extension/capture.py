@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 
 import bpy
 import numpy as np
@@ -147,20 +148,28 @@ def settings_dict(s):
     return d
 
 
-def _python_env():
-    """Environment for the worker: the bundled Python finds numpy itself; add the folder holding the extension's
-    wheels (wasmtime) so the optional libjxl engine works too."""
-    env = dict(os.environ)
-    extra = []
-    try:
-        import wasmtime
-        extra.append(os.path.dirname(os.path.dirname(os.path.abspath(wasmtime.__file__))))
-    except Exception:                                                  # noqa: BLE001
-        pass
-    if extra:
-        env["PYTHONPATH"] = os.pathsep.join(extra + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return env
+# The worker is a small program of its own. Rather than import the add-on's package from another process, the add-on
+# zips the (bpy-free) encoder modules next to each job and runs the archive as a script: Python itself puts the archive
+# on its path, so the worker needs no sys.path / sys.modules changes and no environment variables.
+_WORKER_FILES = ("frames.py", "jxlcore.py", "engine.py", "pyengine.py", "worker.py")
+_WORKER_MAIN = "import sys\nfrom fraxworker import worker\nworker.main(sys.argv[1])\n"
+
+
+def _build_worker_zip(path):
+    here = os.path.dirname(os.path.abspath(__file__))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("__main__.py", _WORKER_MAIN)
+        z.writestr("fraxworker/__init__.py", "")
+        for n in _WORKER_FILES:
+            z.write(os.path.join(here, n), "fraxworker/" + n)
+        for n in sorted(os.listdir(os.path.join(here, "jxl"))):
+            if n.endswith(".py"):
+                z.write(os.path.join(here, "jxl", n), "fraxworker/jxl/" + n)
+
+
+def _worker_command(archive, spool):
+    """Blender's own Python, started the way Blender asks (bpy.app.python_args keeps the environment compatible)."""
+    return [sys.executable, *bpy.app.python_args, archive, spool]
 
 
 class AnimationWriter:
@@ -196,10 +205,11 @@ class AnimationWriter:
                    path=path, cache_dir=cache_dir, remove_frames=bool(s.remove_frames), files=[])
         with open(os.path.join(self.spool, "job.json"), "w", encoding="utf-8") as f:
             json.dump(job, f)
-        here = os.path.dirname(os.path.abspath(__file__))
-        self.proc = subprocess.Popen([sys.executable, os.path.join(here, "worker.py"), self.spool, here],
-                                     env=_python_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        archive = os.path.join(self.spool, "frax_worker.zip")
+        _build_worker_zip(archive)
+        self.proc = subprocess.Popen(_worker_command(archive, self.spool), stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     # ── status (polled from the main thread) ──
     def _poll(self):

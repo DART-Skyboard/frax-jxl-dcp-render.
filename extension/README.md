@@ -32,6 +32,7 @@ Edit ▸ Preferences ▸ Get Extensions ▸ ⌄ ▸ **Install from Disk…** →
 * **Stills** — Image Editor / render window: **Image ▸ Save as JPEG XL…** (also Render ▸ Save Render as JPEG XL…).
   Works for the Render Result, the compositor Viewer and any image. **Image ▸ Open JPEG XL…** loads .jxl files.
 * **Animations** — Render ▸ **Render Animation → JPEG XL** renders the frame range into one animated .jxl, timed at the
+  The frames are encoded by a separate Python process started the way Blender asks (`[sys.executable, *bpy.app.python_args, …]`), from a small archive the add-on writes next to the job, so rendering never waits and the process changes no import paths. That process uses the pure-Python encoder; the optional libjxl (WebAssembly) engine applies to stills.
   scene frame rate. Or tick **Also write an animated .jxl** and every normal Ctrl F12 image-sequence render is packed too.
 * **Options** — Output Properties ▸ **JPEG XL (Frax)**: presets, lossy / modular / lossless, quality ↔ distance, effort,
   decode speed, 8 / 10 / 12 / 16-bit and 16 / 32-bit float, display (view transform) or scene-linear HDR, sRGB / linear /

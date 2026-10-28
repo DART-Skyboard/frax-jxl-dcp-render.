@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Frax JPEG XL animation worker — runs in its OWN PROCESS (started with Blender's bundled Python), never inside
-# Blender. It reads frames that Blender has written (TIFF / EXR files, or .npy arrays), encodes them into one
+# Frax JPEG XL animation worker. It runs in its OWN PROCESS (Blender's bundled Python, started as
+# [sys.executable, *bpy.app.python_args, <worker zip>, <spool folder>]), never inside Blender. capture.py zips this
+# file with the encoder modules into the spool folder and runs that archive as a script, so the worker imports its own
+# package the ordinary way: nothing here touches sys.path or sys.modules. It reads the frames Blender has written
+# (TIFF / EXR files, or .npy arrays), encodes them into one
 # animated JPEG XL and reports through status.json. Blender talks to it only through files in a spool folder:
 #   job.json    settings + timing, written once        queue.txt   append-only: "F|frame|file", "N|frame|npy|linear",
 #   status.json frames done / bytes / done / error                  "END" (finish and write) or "ABORT" (quit)
@@ -12,6 +15,10 @@ import sys
 import time
 import types
 
+import numpy as np
+
+from . import frames, jxlcore
+
 
 def _status(spool, **kw):
     tmp = os.path.join(spool, "status.json.tmp")
@@ -20,17 +27,7 @@ def _status(spool, **kw):
     os.replace(tmp, os.path.join(spool, "status.json"))
 
 
-def main(spool, ext):
-    # import the extension's modules as a bare package ("fraxext") without running its __init__ (which needs bpy)
-    here = os.path.abspath(ext)
-    sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") not in (here, os.path.abspath("."))]
-    pkg = types.ModuleType("fraxext")
-    pkg.__path__ = [here]
-    pkg.__package__ = "fraxext"
-    sys.modules["fraxext"] = pkg
-    import numpy as np
-    from fraxext import frames, jxlcore
-
+def main(spool):
     with open(os.path.join(spool, "job.json"), "r", encoding="utf-8") as f:
         job = json.load(f)
     s = types.SimpleNamespace(**job["settings"])
@@ -111,4 +108,4 @@ def main(spool, ext):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1])

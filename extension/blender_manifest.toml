@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "frax_jxl_dcp_render"
-version = "1.2.3"
+version = "1.2.4"
 name = "Frax JXL DCP Render"
 tagline = "Render to JPEG XL stills and animations, and festival DCPs"
 authors = ["Justin Venable CEO @ Radical Deepscale | DART Meadow"]
@@ -9,7 +9,7 @@ maintainer = "Radical Deepscale <justin@dartmeadow.com>"
 type = "add-on"
 website = "https://radicaldeepscale.com/frax.html"
 tracker_url = "https://radicaldeepscale.com/frax.html"
-tags = ["Render", "Import-Export", "Animation", "Compositing"]
+tags = ["Render"]
 
 blender_version_min = "5.2.0"
 
