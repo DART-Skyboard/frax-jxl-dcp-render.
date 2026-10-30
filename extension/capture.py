@@ -13,7 +13,9 @@ import zipfile
 import bpy
 import numpy as np
 
-from . import engine, pyengine                                         # noqa: F401  (re-exported for callers)
+from frax_libjxl import engine
+
+from . import pyengine                                         # noqa: F401  (re-exported for callers)
 from .jxlcore import (Plan, add_with_focus, analyse, focus_pixels, frame_options,  # noqa: F401
                       hlg_encode, linear_to_bt709, linear_to_srgb, pq_encode, srgb_to_linear, to_target, use_libjxl,
                       xmp_xml)
@@ -149,9 +151,9 @@ def settings_dict(s):
 
 
 # The worker is a small program of its own. Rather than import the add-on's package from another process, the add-on
-# zips the (bpy-free) encoder modules next to each job and runs the archive as a script: Python itself puts the archive
+# zips the (bpy-free) encoder modules and the frax_libjxl wrapper next to each job and runs the archive as a script: Python itself puts the archive
 # on its path, so the worker needs no sys.path / sys.modules changes and no environment variables.
-_WORKER_FILES = ("frames.py", "jxlcore.py", "engine.py", "pyengine.py", "worker.py")
+_WORKER_FILES = ("frames.py", "jxlcore.py", "pyengine.py", "worker.py")
 _WORKER_MAIN = "import sys\nfrom fraxworker import worker\nworker.main(sys.argv[1])\n"
 
 
@@ -162,6 +164,10 @@ def _build_worker_zip(path):
         z.writestr("fraxworker/__init__.py", "")
         for n in _WORKER_FILES:
             z.write(os.path.join(here, n), "fraxworker/" + n)
+        core = os.path.dirname(os.path.abspath(engine.__file__))          # frax_libjxl (the bundled wheel): Python files only
+        for n in sorted(os.listdir(core)):
+            if n.endswith(".py"):
+                z.write(os.path.join(core, n), "frax_libjxl/" + n)
         for n in sorted(os.listdir(os.path.join(here, "jxl"))):
             if n.endswith(".py"):
                 z.write(os.path.join(here, "jxl", n), "fraxworker/jxl/" + n)

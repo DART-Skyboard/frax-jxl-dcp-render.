@@ -4,8 +4,10 @@
 # process that packs animations (worker.py), which is why it must never import bpy.
 import numpy as np
 
-from . import engine, pyengine
-from .engine import ID, quality_to_distance
+from frax_libjxl import engine
+from frax_libjxl.engine import ID, quality_to_distance
+
+from . import pyengine
 
 # ── colour maths ──────────────────────────────────────────────────────────────────────────────────────────────
 M_709_TO_2020 = np.array([[0.6274040, 0.3292820, 0.0433136], [0.0690970, 0.9195400, 0.0113612], [0.0163916, 0.0880132, 0.8955950]], np.float32)

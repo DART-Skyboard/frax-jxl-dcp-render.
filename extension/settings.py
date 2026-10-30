@@ -4,7 +4,7 @@ import bpy
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty,
                        StringProperty)
 
-from .engine import quality_to_distance
+from frax_libjxl.engine import quality_to_distance
 from .jxlcore import depth_params, frame_options                    # noqa: F401  (moved to the bpy-free core)
 
 AUTO = ("-1", "Auto", "Let the encoder decide")

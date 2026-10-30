@@ -19,7 +19,7 @@ Support and troubleshooting: see [`docs/index.html`](docs/index.html) (published
 ```
 blender --command extension build --source-dir extension --split-platforms
 ```
-This makes one zip per operating system; upload each as its own version on extensions.blender.org. The `wasmtime` wheels are bundled in release zips only (not in git). Source for the extension is in `extension/`.
+This makes one zip per operating system; upload each as its own version on extensions.blender.org. libjxl (the WebAssembly build plus its small Python wrapper) is its own wheel, `frax-libjxl`, with source in `libjxl/` (build: `cd libjxl && python -m pip wheel . --no-deps -w ../extension/wheels`). The built `frax-libjxl` and `wasmtime` wheels are bundled in release zips only (not in git). Source for the extension is in `extension/`.
 
 ## Credits
 JPEG XL and libjxl by the JPEG XL Project Authors (BSD-3-Clause). wasmtime (Apache-2.0).

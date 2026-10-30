@@ -55,5 +55,5 @@ PKL, ASSETMAP and VOLINDEX. Output: unencrypted SMPTE 2K at ≈125 Mbit/s, verif
 **Builder ▸ DCP-o-matic** — for 4K, Interop or encryption: drives the free DCP-o-matic (dcpomatic.com) command line.
 
 ## Rebuild
-`build.sh` downloads the wasmtime wheels and builds the per-platform zips with Blender's extension builder.
+`build.sh` builds the `frax-libjxl` wheel from `../libjxl`, downloads the wasmtime wheels and builds the per-platform zips with Blender's extension builder.
 The WebAssembly engine is built from `tools/frax-jxl/jxw.c` (same bridge as Frax Studio in the browser).

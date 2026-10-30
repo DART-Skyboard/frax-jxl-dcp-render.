@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frax-libjxl"
+version = "0.13.0.1"
+description = "libjxl 0.13 compiled to WebAssembly, with a small Python wrapper (run through wasmtime)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "BSD-3-Clause" }
+dependencies = []          # numpy comes with Blender; wasmtime is the extension's own wheel
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["frax_libjxl"]
+
+[tool.setuptools.package-data]
+frax_libjxl = ["frax-jxl-wasi.wasm"]

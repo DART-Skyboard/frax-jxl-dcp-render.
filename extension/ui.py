@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import bpy
 
-from . import animation, dcp, engine
+from frax_libjxl import engine
+
+from . import animation, dcp
 
 
 class _Out:

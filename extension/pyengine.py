@@ -4,7 +4,7 @@
 # to whichever engine the scene picks; this one needs nothing but Python and numpy.
 import numpy as np
 
-from .engine import ID
+from frax_libjxl.engine import ID
 from .jxl.encoder import Encoder as _JXL
 from .jxl.encoder import FrameOptions, ImageOptions, float_to_samples
 

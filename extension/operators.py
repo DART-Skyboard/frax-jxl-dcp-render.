@@ -7,7 +7,9 @@ import numpy as np
 from bpy.props import EnumProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
-from . import animation, capture, dcp, engine
+from frax_libjxl import engine
+
+from . import animation, capture, dcp
 
 PRESETS = {
     "WEB": dict(mode="LOSSY", quality=82.0, effort=7, progressive_dc="1", progressive_ac="1", bit_depth="8", source="DISPLAY", color="0"),
